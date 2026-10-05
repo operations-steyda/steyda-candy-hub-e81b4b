@@ -68,12 +68,73 @@ async function runErt(items) {
   return { supplier: "ert", ok: true, note: "Filled " + fill.filled + " lines, checked, and added to cart. Review the ERT cart before checkout." };
 }
 
-// ---------- Dagab / Privab: not yet mapped ----------
+// ---------- Dagab: left manual (human-verification / CAPTCHA gate) ----------
+// Dagab's shop (handla.dagab.se) is behind a "confirm you are human" bot check,
+// which we will not bypass. Dagab orders stay manual.
 async function runDagab(items) {
-  return { supplier: "dagab", ok: false, note: "Dagab not configured yet — needs its site mapped (log in and we'll add it)." };
+  return { supplier: "dagab", ok: false, note: "Dagab is not automatable — its shop is behind a human-verification check. Order Dagab manually." };
 }
+
+// ---------- Privab: express-purchase search flow ----------
+// Page: https://privab.se/expresskoep
+// Per SKU: type the SKU into the express search box -> a result row appears with a
+// quantity input id="Quantity_{SKU}_" -> set qty -> click "Add everything to cart".
+// (Exact-SKU search returns just that product, so "Add everything" adds only it.)
+// Never clicks the "Cash" (checkout) button.
+
+// Runs IN the page: searches one SKU and sets its quantity. Async (polls for the row).
+async function privabSearchAndSetQty(sku, qty) {
+  function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+  function nativeSet(el, v){
+    const d = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
+    d.set.call(el, v);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  // express search box = the type=search named "q" that is NOT in the header
+  const searches = [...document.querySelectorAll('input[type=search][name="q"]')];
+  const search = searches.find(i => !i.closest("header,[role=banner]")) || searches[0];
+  if (!search) return { sku, found: false, note: "express search box not found — are you logged in to privab.se?" };
+  nativeSet(search, sku);
+  // trigger the search (Enter)
+  ["keydown","keypress","keyup"].forEach(t =>
+    search.dispatchEvent(new KeyboardEvent(t, { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true })));
+  const f = search.closest("form"); if (f && f.requestSubmit) { try { f.requestSubmit(); } catch(e){} }
+  // poll for the qty input for this SKU
+  const qtyId = "Quantity_" + sku + "_";
+  let qtyEl = null;
+  for (let i = 0; i < 24; i++) { qtyEl = document.getElementById(qtyId); if (qtyEl) break; await sleep(300); }
+  if (!qtyEl) return { sku, found: false, note: "no result row for " + sku + " (check the Privab article number)" };
+  nativeSet(qtyEl, String(qty));
+  return { sku, found: true, qty: qtyEl.value };
+}
+
+// Runs IN the page: clicks "Add everything to cart" (the current search's results).
+function privabClickAdd() {
+  const btn = [...document.querySelectorAll("button")].find(b => /add everything to cart/i.test((b.textContent||"")));
+  if (!btn) return false;
+  btn.click();
+  return true;
+}
+
 async function runPrivab(items) {
-  return { supplier: "privab", ok: false, note: "Privab not configured yet — needs its site mapped (log in and we'll add it)." };
+  const tab = await openTab("https://privab.se/expresskoep");
+  await waitForLoad(tab.id);
+  // logged-in / page check
+  const hasSearch = await runInTab(tab.id, () =>
+    [...document.querySelectorAll('input[type=search][name="q"]')].some(i => !i.closest("header,[role=banner]")));
+  if (!hasSearch) return { supplier: "privab", ok: false, note: "Express-purchase search not found — are you logged in to privab.se?" };
+
+  const lines = [];
+  for (const it of items) {
+    const r = await runInTab(tab.id, privabSearchAndSetQty, [it.sku, it.qty]);
+    if (!r || !r.found) { lines.push({ sku: it.sku, ok: false, note: r ? r.note : "failed" }); continue; }
+    const clicked = await runInTab(tab.id, privabClickAdd);
+    await waitForLoad(tab.id, 8000); // add may postback/navigate
+    lines.push({ sku: it.sku, ok: !!clicked, note: clicked ? "added " + it.qty : "qty set but add button missing" });
+  }
+  const okN = lines.filter(l => l.ok).length;
+  return { supplier: "privab", ok: okN > 0, note: "Added " + okN + "/" + items.length + " lines to the Privab cart. Review before checkout.", lines };
 }
 
 const RUNNERS = { ert: runErt, dagab: runDagab, privab: runPrivab };
@@ -82,7 +143,7 @@ const RUNNERS = { ert: runErt, dagab: runDagab, privab: runPrivab };
 chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return;
   if (msg.type === "STEYDA_PING") {
-    sendResponse({ ok: true, ext: "steyda-candy-order-helper", version: "0.2.0", suppliers: { ert: true, dagab: false, privab: false } });
+    sendResponse({ ok: true, ext: "steyda-candy-order-helper", version: "0.3.0", suppliers: { ert: true, dagab: false, privab: true } });
     return;
   }
   if (msg.type === "STEYDA_ORDER") {
