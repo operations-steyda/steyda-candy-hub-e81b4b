@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "STEYDA Candy Order Helper",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Adds the STEYDA candy shopping list to ERT / Dagab / Privab carts. Add-to-cart only — you review and check out.",
   "permissions": ["scripting", "tabs", "storage"],
   "host_permissions": [
     "https://www.ertgodis.se/*",
     "https://ertgodis.se/*",
+    "https://webbshop.ertgodis.se/*",
     "https://www.dagab.se/*",
     "https://dagab.se/*",
     "https://privab.se/*",
