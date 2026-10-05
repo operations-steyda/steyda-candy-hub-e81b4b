@@ -18,19 +18,16 @@ You review each cart and place the order yourself.
 5. **Send me that Extension ID** — I'll wire the "🧩 Add to cart" button into Billy
    (it goes into `STEYDA_EXT_ID`, then I re-encrypt + push the dashboard).
 
-## Filling the selectors (required before it actually clicks)
-`background.js` has three stubbed functions: `ertAddItem`, `dagabAddItem`,
-`privabAddItem`, plus a `searchUrl` per supplier. They need the **real** page
-details for each site:
-- the search URL (or product URL) for a SKU,
-- the quantity input selector,
-- the add-to-cart button selector,
-- (if search lands on a results list) the "open first result" selector.
+## Supplier status
+- **ERT — ✅ automated.** Uses the Quick-order bulk grid at
+  `webbshop.ertgodis.se/sv/Meny/Snabborder` (fills rows, Check, then Shop = add to cart).
+- **Privab — ✅ automated.** Uses the Express-purchase page `privab.se/expresskoep`:
+  per SKU it searches the article number, sets the quantity, and clicks
+  "Add everything to cart". Use **Privab article numbers** (e.g. `47-16137`).
+- **Dagab — ✋ manual.** Dagab's shop is behind a human-verification ("confirm you
+  are human") check, which we will not bypass. Order Dagab by hand.
 
-To fill them: on each logged-in site, search a known SKU, right-click the quantity
-box / add-to-cart button → **Inspect**, and copy a selector (id or class).
-**I can do this with you** via Claude-in-Chrome — I'll inspect each site and fill
-the three functions, so you don't have to hand-write selectors.
+All of it is **add-to-cart only** — the extension never clicks checkout / "Cash".
 
 ## Safety
 - No checkout, no payment, no address entry — ever. It stops at "added to cart".
