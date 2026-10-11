@@ -282,11 +282,78 @@ def encrypt(plaintext):
 
 def splice_const(html, name, obj):
     js = json.dumps(obj, ensure_ascii=False).replace("</", "<\\/")
+    repl = "const " + name + " = " + js + ";"
     pat = re.compile(r"const " + name + r" = \{.*?\};", re.S)
-    new, n = pat.subn("const " + name + " = " + js + ";", html, count=1)
+    new, n = pat.subn(lambda _m: repl, html, count=1)  # func repl: no backslash escaping
     if n != 1:
         raise RuntimeError("could not splice const %s (matched %d)" % (name, n))
     return new
+
+
+def splice_line(html, name, value_js):
+    """Replace a whole single-line `const NAME = ...;` with a prebuilt JS value."""
+    repl = "const " + name + " = " + value_js + ";"
+    pat = re.compile(r"^const " + name + r" = .*$", re.M)
+    new, n = pat.subn(lambda _m: repl, html, count=1)  # func repl: no backslash escaping
+    if n != 1:
+        raise RuntimeError("could not splice line const %s (matched %d)" % (name, n))
+    return new
+
+
+def payload_skus(html):
+    m = re.search(r"const PAYLOAD = (\{.*?\});\s*\nconst ", html, re.S)
+    if not m:
+        m = re.search(r"const PAYLOAD = (\{.*\})", html)
+    p = json.loads(m.group(1).replace("<\\/", "</"))
+    return p, [r["sku"] for r in p["DATA"]["inv"]]
+
+
+def apply_inventory(plain0, consts_path):
+    """Guarded splice of the inventory/warehouse consts from the private build.
+    Returns (new_plain, note). On any guard failure, returns (plain0, reason) so
+    the daily job still publishes the PPC refresh but never a suspect inventory plan.
+    """
+    try:
+        with io.open(consts_path, encoding="utf-8") as fh:
+            consts = json.load(fh)
+    except Exception as e:
+        return plain0, "no inventory consts (%s) — kept current inventory" % e
+    try:
+        curP, cur_skus = payload_skus(plain0)
+        freshP = json.loads(consts["PAYLOAD"].replace("<\\/", "</"))
+        fresh = {r["sku"]: r for r in freshP["DATA"]["inv"]}
+        fresh_skus = list(fresh)
+        # GUARD 1: SKU set must not change (DataDoe status lag can silently drop sellers)
+        dropped = sorted(set(cur_skus) - set(fresh_skus))
+        added = sorted(set(fresh_skus) - set(cur_skus))
+        if dropped or added:
+            return plain0, ("GUARD: SKU set changed (dropped %s, added %s) — inventory left "
+                            "unchanged; run a manual refresh to review." % (dropped, added))
+        # GUARD 2: velocities must not be globally zero (thin/failed data pull)
+        if not any((r["m"]["blend"].get("vel_day") or 0) > 0 for r in fresh.values()):
+            return plain0, "GUARD: all velocities zero — thin data; inventory left unchanged."
+        # GUARD 3: no single SKU's order_qty may explode vs current (bad-data swing)
+        cur = {r["sku"]: r for r in curP["DATA"]["inv"]}
+        for sku, fr in fresh.items():
+            fo = fr["m"]["blend"].get("order_qty") or 0
+            co = cur.get(sku, {}).get("m", {}).get("blend", {}).get("order_qty") or 0
+            if co and fo > max(co * 6, co + 5000):
+                return plain0, ("GUARD: %s order_qty jumped %s->%s — inventory left unchanged." % (sku, co, fo))
+    except Exception as e:
+        return plain0, "GUARD: inventory validation error (%s) — inventory left unchanged." % e
+    # guards passed: splice PAYLOAD + warehouse consts + stock
+    plain = plain0
+    for name in ("PAYLOAD", "WH", "SHIP", "JOARHTML"):
+        if name in consts and ("const %s = " % name) in plain:
+            plain = splice_line(plain, name, consts[name])
+    if "stock" in consts:
+        plain = re.sub(r"(, stock: )\{[^{}]*\}(, stockDate:)",
+                       lambda m: m.group(1) + consts["stock"] + m.group(2), plain, count=1)
+    if "stockDate" in consts:
+        plain = re.sub(r'(stockDate:\s*")[^"]*(")',
+                       lambda m: m.group(1) + consts["stockDate"] + m.group(2), plain, count=1)
+    return plain, "inventory refreshed (%d SKUs, asof %s)" % (len(fresh_skus),
+                                                              freshP["DATA"]["meta"].get("asof"))
 
 
 def main():
@@ -309,6 +376,9 @@ def main():
             sys.exit("expected exactly one %s in plaintext" % name)
     plain = splice_const(plain0, "ADS", ads)
     plain = splice_const(plain, "KEYWORDS", kw)
+    consts_path = os.environ.get("INVENTORY_CONSTS", os.path.join(HERE, "_private", "out", "consts.json"))
+    plain, invnote = apply_inventory(plain, consts_path)
+    print("Inventory:", invnote)
     if plain == plain0:
         print("No data change; leaving index.html unchanged.")
         return

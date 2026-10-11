@@ -17,8 +17,15 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout public site
         uses: actions/checkout@v4
+
+      - name: Checkout private build repo (model + assets)
+        uses: actions/checkout@v4
+        with:
+          repository: kitbrianhernandez-ai/steyda-candy-build
+          token: ${{ secrets.BUILD_REPO_TOKEN }}
+          path: build/_private
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -26,12 +33,19 @@ jobs:
           python-version: "3.12"
 
       - name: Install deps
-        run: pip install -r build/requirements.txt
+        run: pip install -r build/requirements.txt -r build/_private/requirements.txt
 
-      - name: Refresh PPC + keyword data (DataDoe) and re-encrypt
+      - name: Build inventory consts (private model → consts.json)
+        working-directory: build/_private
+        env:
+          DATADOE_API_KEY: ${{ secrets.DATADOE_API_KEY }}
+        run: python build_inventory.py
+
+      - name: Refresh PPC + keywords + inventory and re-encrypt
         env:
           DATADOE_API_KEY: ${{ secrets.DATADOE_API_KEY }}
           SITE_PW: ${{ secrets.SITE_PW }}
+          INVENTORY_CONSTS: build/_private/out/consts.json
         run: python build/refresh.py
 
       - name: Commit & push if changed
@@ -40,7 +54,7 @@ jobs:
             git config user.name "steyda-refresh-bot"
             git config user.email "operations@steyda.com"
             git add index.html
-            git commit -m "Daily refresh: PPC + keywords ($(date -u +%Y-%m-%d))"
+            git commit -m "Daily refresh ($(date -u +%Y-%m-%d))"
             git push
             echo "Pushed refreshed dashboard."
           else
