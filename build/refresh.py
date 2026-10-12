@@ -190,6 +190,46 @@ def build_keywords():
             "items": items}
 
 
+# ---------- INBOUND (FBA inbound shipments) ----------
+SRC_INBOUND = "8bc6f4bd09"
+STATUS_ORDER = ["IN_TRANSIT", "RECEIVING", "READY_TO_SHIP"]
+
+
+def build_inbound(name_map):
+    r = rows({"sellerOrVendorIds": [SELLER], "sourceId": SRC_INBOUND,
+              "columns": ["seller_sku", "child_asin", "quantity",
+                          "fba_inbound_shipment_status", "destination_warehouse_id"],
+              "outputType": "CSV", "limit": 5000})
+    by = {}
+    for x in r:
+        st = x.get("fba_inbound_shipment_status") or ""
+        d = by.setdefault(st, {"status": st, "lines": 0, "units": 0, "skus": set(), "items": []})
+        q = int(num(x.get("quantity")))
+        d["lines"] += 1; d["units"] += q; d["skus"].add(x.get("seller_sku"))
+        d["items"].append({"sku": x.get("seller_sku"), "asin": x.get("child_asin"),
+                           "qty": q, "fc": x.get("destination_warehouse_id") or ""})
+
+    def rollup(items):
+        agg = {}
+        for it in items:
+            a = agg.setdefault(it["sku"], {"sku": it["sku"], "asin": it["asin"], "units": 0, "fcs": set()})
+            a["units"] += it["qty"]; a["fcs"].add(it["fc"])
+        out = [{"sku": a["sku"], "name": name_map.get(a["sku"], a["sku"]), "asin": a["asin"],
+                "units": a["units"], "fc": ",".join(sorted(y for y in a["fcs"] if y))} for a in agg.values()]
+        out.sort(key=lambda z: -z["units"]); return out
+
+    status = [{"status": k, "lines": v["lines"], "units": v["units"], "skus": len(v["skus"])}
+              for k, v in by.items()]
+    groups = []
+    for st in STATUS_ORDER + [k for k in by if k not in STATUS_ORDER]:
+        if st in by:
+            v = by[st]
+            groups.append({"status": st, "lines": v["lines"], "units": v["units"], "skus": rollup(v["items"])})
+    return {"status": status, "groups": groups,
+            "total_units": sum(s["units"] for s in status),
+            "total_lines": sum(s["lines"] for s in status)}
+
+
 # ---------- crypto (matches encrypt_site.py) ----------
 def decrypt(index_html):
     def grab(name):
@@ -379,6 +419,19 @@ def main():
     consts_path = os.environ.get("INVENTORY_CONSTS", os.path.join(HERE, "_private", "out", "consts.json"))
     plain, invnote = apply_inventory(plain, consts_path)
     print("Inventory:", invnote)
+    # Inbound shipments (DataDoe) — product names come from the current PAYLOAD
+    try:
+        _pm = json.loads(re.search(r"const PAYLOAD = (\{.*?\});", plain, re.S).group(1).replace("<\\/", "</"))
+        _nm = {rr["sku"]: (rr.get("shortname") or rr["sku"]) for rr in _pm["DATA"]["inv"]}
+    except Exception:
+        _nm = {}
+    try:
+        inb = build_inbound(_nm)
+        if inb["status"] and plain.count("const INBOUND = ") == 1:
+            plain = splice_const(plain, "INBOUND", inb)
+            print("Inbound: %d units, %d lines" % (inb["total_units"], inb["total_lines"]))
+    except Exception as e:
+        print("Inbound refresh skipped:", e)
     if plain == plain0:
         print("No data change; leaving index.html unchanged.")
         return

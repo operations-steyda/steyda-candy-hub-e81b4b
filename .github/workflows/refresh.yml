@@ -2,8 +2,9 @@ name: Daily dashboard refresh
 
 on:
   schedule:
-    # 05:10 UTC daily ≈ 06:10–07:10 Sweden time. Adjust the cron if you want a different hour.
-    - cron: "10 5 * * *"
+    # Mondays only, 05:10 UTC ≈ 06:10–07:10 Sweden time. Use the in-dashboard
+    # "Refresh now" button for any off-schedule update. (cron day-of-week 1 = Monday.)
+    - cron: "10 5 * * 1"
   workflow_dispatch:        # adds a manual "Run workflow" button in the Actions tab
 
 concurrency:
