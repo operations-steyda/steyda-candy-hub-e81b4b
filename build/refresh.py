@@ -36,6 +36,9 @@ PW = os.environ["SITE_PW"]
 
 
 # ---------- DataDoe REST ----------
+_last_req = [0.0]  # throttle: DataDoe allows max 2 requests/sec per org
+
+
 def _http(method, path, body=None):
     # Shell out to curl: the DataDoe edge rejects urllib (HTTP 406) but accepts curl.
     args = ["curl", "-sS", "-L", "--fail-with-body", "-X", method, API + path,
@@ -44,11 +47,20 @@ def _http(method, path, body=None):
     if body is not None:
         args += ["-H", "Content-Type: application/json", "--data-binary", "@-"]
         inp = json.dumps(body).encode()
-    p = subprocess.run(args, input=inp, capture_output=True)
-    if p.returncode != 0:
-        raise RuntimeError("curl %s %s failed (%d): %s" % (method, path, p.returncode,
-                           (p.stdout or p.stderr).decode("utf-8", "replace")[:400]))
-    return p.stdout
+    for attempt in range(6):
+        gap = time.time() - _last_req[0]
+        if gap < 0.6:
+            time.sleep(0.6 - gap)
+        _last_req[0] = time.time()
+        p = subprocess.run(args, input=inp, capture_output=True)
+        out = (p.stdout or p.stderr).decode("utf-8", "replace")
+        if p.returncode == 0:
+            return p.stdout
+        if ("RATE_LIMIT" in out or '"status":429' in out) and attempt < 5:
+            time.sleep(1.5 + attempt)  # back off and retry
+            continue
+        raise RuntimeError("curl %s %s failed (%d): %s" % (method, path, p.returncode, out[:400]))
+    raise RuntimeError("curl %s %s: rate-limit retries exhausted" % (method, path))
 
 
 def export_csv(payload, timeout_s=240):
