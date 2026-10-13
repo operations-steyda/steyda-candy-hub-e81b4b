@@ -274,7 +274,12 @@ def build_negatives():
 
 # ---------- INBOUND (FBA inbound shipments) ----------
 SRC_INBOUND = "8bc6f4bd09"
-STATUS_ORDER = ["IN_TRANSIT", "RECEIVING", "READY_TO_SHIP"]
+# Display order for genuinely in-transit shipments (flow: created -> shipped -> arriving).
+STATUS_ORDER = ["WORKING", "READY_TO_SHIP", "SHIPPED", "IN_TRANSIT", "DELIVERED", "CHECKED_IN", "RECEIVING"]
+# Statuses that are NOT in-transit, so they must NOT count as inbound: CLOSED = fully
+# received (units already in FBA/On-hand), plus cancelled/deleted/errored plans. Including
+# them double-counts and makes the total disagree with Seller Central Manage Shipments.
+INBOUND_EXCLUDE = {"CLOSED", "CANCELLED", "DELETED", "ERROR", "DELIVERED_OVERAGE"}
 
 
 def build_inbound(name_map):
@@ -285,6 +290,8 @@ def build_inbound(name_map):
     by = {}
     for x in r:
         st = x.get("fba_inbound_shipment_status") or ""
+        if st.upper() in INBOUND_EXCLUDE:
+            continue   # not in transit — already received or cancelled
         d = by.setdefault(st, {"status": st, "lines": 0, "units": 0, "skus": set(), "items": []})
         q = int(num(x.get("quantity")))
         d["lines"] += 1; d["units"] += q; d["skus"].add(x.get("seller_sku"))
