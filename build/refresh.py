@@ -203,18 +203,13 @@ def build_keywords():
 
 
 # ---------- NEGATIVES (broad-match search terms wasting spend) ----------
-# Signatures that mark a term as a wrong product / category / brand / diet mismatch
-# -> negate EXACT with high confidence. Everything else is flagged for review.
-NEG_MISMATCH = ["japanese", "german", "english", " uk ", "uk candy", "foreign", "exotic",
-                "weird", "unique", "cotton candy", "wax candy", "chocolate", "haribo",
-                "unreal", "squish", "squashies", "sour patch", "vegan", "healthy",
-                "sugar free", "sugar-free", "dye free", "dye-free", "keto", "organic",
-                "nerds", "trolli", "albanese", "lifesavers", "jelly belly", "skittles", "starburst"]
-
-
-def _neg_mismatch(term):
-    t = " " + (term or "") + " "
-    return any(m in t for m in NEG_MISMATCH)
+# Irrelevant ROOT phrases: one negative-PHRASE blocks the whole family of queries
+# that contain the root. Brand terms (bubs, squashies) are NEVER listed here.
+NEG_ROOTS = ["squish", "haribo", "japanese", "german", "english candy", "foreign", "exotic",
+             "weird", "cotton candy", "wax candy", "chocolate", "unreal", "sour patch",
+             "vegan", "healthy", "sugar free", "sugar-free", "dye free", "dye-free", "keto",
+             "organic", "nerds", "trolli", "albanese", "lifesavers", "jelly belly",
+             "skittles", "starburst", "freeze dried"]
 
 
 def build_negatives():
@@ -232,39 +227,49 @@ def build_negatives():
                                      "value": "BROAD", "not": False}]},
               "from": FROM, "to": TO, "orderByColumn": "spend", "orderByDirection": "DESC",
               "outputType": "CSV", "limit": 5000})
-    out = []
+    # per-term (across campaigns) for phrase roots; per (term,campaign) for exact list
+    byterm = {}
+    bytc = {}
+    scanned = 0
     for x in r:
         term = (x["ad_search_term"] or "").strip().lower()
-        camp = x["ad_campaign_name"]
         if not term or term == "*" or re.match(r"^b0[a-z0-9]{8}$", term):
             continue
-        spend = num(x["spend"]); sales = num(x["sales"])
-        clicks = int(num(x["clicks"])); orders = int(num(x["orders"]))
-        acos = round(spend / sales * 100) if sales else None
-        mism = _neg_mismatch(term)
-        if orders == 0 and (clicks >= 4 or spend >= 3):
-            cf = "high" if mism else "med"
-            out.append({"t": term, "c": camp, "m": "negativeExact",
-                        "r": "0 orders / mismatch" if cf == "high" else "0 orders, wasted spend",
-                        "sp": round(spend, 2), "cl": clicks, "o": orders, "ac": None,
-                        "cf": cf, "cat": "waster"})
-        elif orders > 0 and sales > 0 and acos and acos > 60 and spend >= 2:
-            cf = "high" if mism else "med"
-            out.append({"t": term, "c": camp,
-                        "m": "negativeExact" if mism else "negativePhrase",
-                        "r": ("ACOS %d%% (mismatch)" % acos) if cf == "high" else ("ACOS %d%% unprofitable" % acos),
-                        "sp": round(spend, 2), "cl": clicks, "o": orders, "ac": acos,
-                        "cf": cf, "cat": "bleeder"})
-    out.sort(key=lambda d: -d["sp"])
-    waster = round(sum(d["sp"] for d in out if d["cat"] == "waster"), 2)
-    bleeder = round(sum(d["sp"] for d in out if d["cat"] == "bleeder"), 2)
-    rows_out = [{k: d[k] for k in ("t", "c", "m", "r", "sp", "cl", "o", "ac", "cf")} for d in out]
+        scanned += 1
+        sp = num(x["spend"]); cl = int(num(x["clicks"])); od = int(num(x["orders"]))
+        a = byterm.setdefault(term, [0.0, 0, 0]); a[0] += sp; a[1] += cl; a[2] += od
+        b = bytc.setdefault((term, x["ad_campaign_name"]), [0.0, 0, 0]); b[0] += sp; b[1] += cl; b[2] += od
+
+    phrase = []
+    covered = set()
+    for root in NEG_ROOTS:
+        sp = cl = od = 0.0; terms = []
+        for t, v in byterm.items():
+            if root in t:
+                sp += v[0]; cl += v[1]; od += v[2]; terms.append(t)
+        if sp >= 2 and terms:
+            phrase.append({"root": root, "sp": round(sp, 2), "terms": len(terms),
+                           "cl": int(cl), "o": int(od)})
+            covered.update(terms)
+    phrase.sort(key=lambda d: -d["sp"])
+
+    exact = []
+    for (t, c), v in bytc.items():
+        if t in covered:
+            continue
+        sp, cl, od = v
+        if od == 0 and (cl >= 4 or sp >= 3):
+            exact.append({"t": t, "c": c, "sp": round(sp, 2), "cl": cl, "o": od, "ac": None})
+    exact.sort(key=lambda d: -d["sp"])
+
+    ps = round(sum(d["sp"] for d in phrase), 2)
+    es = round(sum(d["sp"] for d in exact), 2)
     return {"asof": TO, "window": WINDOW,
-            "wasteSpend": round(waster + bleeder, 2),
-            "wasterSpend": waster, "bleederSpend": bleeder,
-            "nHigh": sum(1 for d in out if d["cf"] == "high"),
-            "nReview": sum(1 for d in out if d["cf"] == "med"),
-            "rows": rows_out}
+            "source": "DataDoe · Search Term Performance (Ads) · "
+                      "amazon_ads_search_terms_by_campaign_by_date (%s) · broad-match only" % SRC_TERMS,
+            "scanned": scanned, "wasteSpend": round(ps + es, 2),
+            "phraseSpend": ps, "exactSpend": es,
+            "phrase": phrase, "exact": exact}
 
 
 # ---------- INBOUND (FBA inbound shipments) ----------
@@ -483,8 +488,9 @@ def main():
     kw = build_keywords()
     print("KEYWORDS:", len(kw["items"]), "converting keywords")
     neg = build_negatives()
-    print("NEGATIVES: %d candidates, $%.2f at stake (%d high-confidence)"
-          % (len(neg["rows"]), neg["wasteSpend"], neg["nHigh"]))
+    print("NEGATIVES: %d phrase ($%.2f) + %d exact ($%.2f), $%.2f at stake"
+          % (len(neg["phrase"]), neg["phraseSpend"], len(neg["exact"]),
+             neg["exactSpend"], neg["wasteSpend"]))
 
     with io.open(INDEX, encoding="utf-8") as fh:
         enc_html = fh.read()
