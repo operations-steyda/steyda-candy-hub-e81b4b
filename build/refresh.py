@@ -273,47 +273,41 @@ def build_negatives():
 
 
 # ---------- INBOUND (FBA inbound shipments) ----------
-SRC_INBOUND = "8bc6f4bd09"
-# Display order for genuinely in-transit shipments (flow: created -> shipped -> arriving).
-STATUS_ORDER = ["WORKING", "READY_TO_SHIP", "SHIPPED", "IN_TRANSIT", "DELIVERED", "CHECKED_IN", "RECEIVING"]
-# Statuses that are NOT in-transit, so they must NOT count as inbound: CLOSED = fully
-# received (units already in FBA/On-hand), plus cancelled/deleted/errored plans. Including
-# them double-counts and makes the total disagree with Seller Central Manage Shipments.
-INBOUND_EXCLUDE = {"CLOSED", "CANCELLED", "DELETED", "ERROR", "DELIVERED_OVERAGE"}
+# Inbound = units genuinely on the way, from the FBA Inventory Health report's own
+# inbound columns (working / shipped / receiving), NOT the FBA Inbound Shipments feed.
+# The shipments feed counts a shipment's FULL quantity even once its units are located
+# (checked into FBA) — so a "Receiving" shipment at ~100% located double-counts units
+# that are already in Available/On-hand. These columns count only not-yet-available units,
+# which is also exactly what the Pool/replenishment math already uses for "incoming".
+INBOUND_BUCKETS = [("WORKING", "inbound_working"),      # created, not shipped (SC "Ready to ship"/"Working")
+                   ("SHIPPED", "inbound_shipped"),      # shipped, in transit
+                   ("RECEIVING", "inbound_received")]   # arrived, still being checked in
 
 
 def build_inbound(name_map):
-    r = rows({"sellerOrVendorIds": [SELLER], "sourceId": SRC_INBOUND,
-              "columns": ["seller_sku", "child_asin", "quantity",
-                          "fba_inbound_shipment_status", "destination_warehouse_id"],
+    r = rows({"sellerOrVendorIds": [SELLER], "sourceId": SRC_FBA,
+              "columns": ["date", "sku", "child_asin",
+                          "inbound_working", "inbound_shipped", "inbound_received"],
+              "from": (TODAY - datetime.timedelta(days=6)).isoformat(), "to": TO,
               "outputType": "CSV", "limit": 5000})
-    by = {}
-    for x in r:
-        st = x.get("fba_inbound_shipment_status") or ""
-        if st.upper() in INBOUND_EXCLUDE:
-            continue   # not in transit — already received or cancelled
-        d = by.setdefault(st, {"status": st, "lines": 0, "units": 0, "skus": set(), "items": []})
-        q = int(num(x.get("quantity")))
-        d["lines"] += 1; d["units"] += q; d["skus"].add(x.get("seller_sku"))
-        d["items"].append({"sku": x.get("seller_sku"), "asin": x.get("child_asin"),
-                           "qty": q, "fc": x.get("destination_warehouse_id") or ""})
-
-    def rollup(items):
-        agg = {}
-        for it in items:
-            a = agg.setdefault(it["sku"], {"sku": it["sku"], "asin": it["asin"], "units": 0, "fcs": set()})
-            a["units"] += it["qty"]; a["fcs"].add(it["fc"])
-        out = [{"sku": a["sku"], "name": name_map.get(a["sku"], a["sku"]), "asin": a["asin"],
-                "units": a["units"], "fc": ",".join(sorted(y for y in a["fcs"] if y))} for a in agg.values()]
-        out.sort(key=lambda z: -z["units"]); return out
-
-    status = [{"status": k, "lines": v["lines"], "units": v["units"], "skus": len(v["skus"])}
-              for k, v in by.items()]
-    groups = []
-    for st in STATUS_ORDER + [k for k in by if k not in STATUS_ORDER]:
-        if st in by:
-            v = by[st]
-            groups.append({"status": st, "lines": v["lines"], "units": v["units"], "skus": rollup(v["items"])})
+    if not r:
+        return {"status": [], "groups": [], "total_units": 0, "total_lines": 0}
+    latest = max(x.get("date", "") for x in r)
+    latest_rows = [x for x in r if x.get("date") == latest]
+    status, groups = [], []
+    for label, col in INBOUND_BUCKETS:
+        items = []
+        for x in latest_rows:
+            q = int(num(x.get(col)))
+            if q > 0:
+                sku = x.get("sku")
+                items.append({"sku": sku, "name": name_map.get(sku, sku),
+                              "asin": x.get("child_asin"), "units": q, "fc": ""})
+        if items:
+            items.sort(key=lambda z: -z["units"])
+            units = sum(i["units"] for i in items)
+            status.append({"status": label, "lines": len(items), "units": units, "skus": len(items)})
+            groups.append({"status": label, "lines": len(items), "units": units, "skus": items})
     return {"status": status, "groups": groups,
             "total_units": sum(s["units"] for s in status),
             "total_lines": sum(s["lines"] for s in status)}
