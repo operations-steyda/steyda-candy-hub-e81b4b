@@ -202,6 +202,71 @@ def build_keywords():
             "items": items}
 
 
+# ---------- NEGATIVES (broad-match search terms wasting spend) ----------
+# Signatures that mark a term as a wrong product / category / brand / diet mismatch
+# -> negate EXACT with high confidence. Everything else is flagged for review.
+NEG_MISMATCH = ["japanese", "german", "english", " uk ", "uk candy", "foreign", "exotic",
+                "weird", "unique", "cotton candy", "wax candy", "chocolate", "haribo",
+                "unreal", "squish", "squashies", "sour patch", "vegan", "healthy",
+                "sugar free", "sugar-free", "dye free", "dye-free", "keto", "organic",
+                "nerds", "trolli", "albanese", "lifesavers", "jelly belly", "skittles", "starburst"]
+
+
+def _neg_mismatch(term):
+    t = " " + (term or "") + " "
+    return any(m in t for m in NEG_MISMATCH)
+
+
+def build_negatives():
+    r = rows({"sellerOrVendorIds": [SELLER], "sourceId": SRC_TERMS,
+              "columns": ["ad_search_term", "ad_campaign_name", "spend", "sales",
+                          "clicks", "orders", "impressions"],
+              "groupBy": ["ad_search_term", "ad_campaign_name"],
+              "aggregations": [{"column": "ad_spend", "aggregation": "sum", "alias": "spend"},
+                               {"column": "ad_sales", "aggregation": "sum", "alias": "sales"},
+                               {"column": "ad_clicks", "aggregation": "sum", "alias": "clicks"},
+                               {"column": "ad_orders", "aggregation": "sum", "alias": "orders"},
+                               {"column": "ad_impressions", "aggregation": "sum", "alias": "impressions"}],
+              "filters": {"combinator": "and",
+                          "rules": [{"field": "ad_match_type", "operator": "=",
+                                     "value": "BROAD", "not": False}]},
+              "from": FROM, "to": TO, "orderByColumn": "spend", "orderByDirection": "DESC",
+              "outputType": "CSV", "limit": 5000})
+    out = []
+    for x in r:
+        term = (x["ad_search_term"] or "").strip().lower()
+        camp = x["ad_campaign_name"]
+        if not term or term == "*" or re.match(r"^b0[a-z0-9]{8}$", term):
+            continue
+        spend = num(x["spend"]); sales = num(x["sales"])
+        clicks = int(num(x["clicks"])); orders = int(num(x["orders"]))
+        acos = round(spend / sales * 100) if sales else None
+        mism = _neg_mismatch(term)
+        if orders == 0 and (clicks >= 4 or spend >= 3):
+            cf = "high" if mism else "med"
+            out.append({"t": term, "c": camp, "m": "negativeExact",
+                        "r": "0 orders / mismatch" if cf == "high" else "0 orders, wasted spend",
+                        "sp": round(spend, 2), "cl": clicks, "o": orders, "ac": None,
+                        "cf": cf, "cat": "waster"})
+        elif orders > 0 and sales > 0 and acos and acos > 60 and spend >= 2:
+            cf = "high" if mism else "med"
+            out.append({"t": term, "c": camp,
+                        "m": "negativeExact" if mism else "negativePhrase",
+                        "r": ("ACOS %d%% (mismatch)" % acos) if cf == "high" else ("ACOS %d%% unprofitable" % acos),
+                        "sp": round(spend, 2), "cl": clicks, "o": orders, "ac": acos,
+                        "cf": cf, "cat": "bleeder"})
+    out.sort(key=lambda d: -d["sp"])
+    waster = round(sum(d["sp"] for d in out if d["cat"] == "waster"), 2)
+    bleeder = round(sum(d["sp"] for d in out if d["cat"] == "bleeder"), 2)
+    rows_out = [{k: d[k] for k in ("t", "c", "m", "r", "sp", "cl", "o", "ac", "cf")} for d in out]
+    return {"asof": TO, "window": WINDOW,
+            "wasteSpend": round(waster + bleeder, 2),
+            "wasterSpend": waster, "bleederSpend": bleeder,
+            "nHigh": sum(1 for d in out if d["cf"] == "high"),
+            "nReview": sum(1 for d in out if d["cf"] == "med"),
+            "rows": rows_out}
+
+
 # ---------- INBOUND (FBA inbound shipments) ----------
 SRC_INBOUND = "8bc6f4bd09"
 STATUS_ORDER = ["IN_TRANSIT", "RECEIVING", "READY_TO_SHIP"]
@@ -417,6 +482,9 @@ def main():
           % (len(ads["campaigns"]), ads["total"]["spend"], ads["total"]["sales"], ads["total"]["tacos"]))
     kw = build_keywords()
     print("KEYWORDS:", len(kw["items"]), "converting keywords")
+    neg = build_negatives()
+    print("NEGATIVES: %d candidates, $%.2f at stake (%d high-confidence)"
+          % (len(neg["rows"]), neg["wasteSpend"], neg["nHigh"]))
 
     with io.open(INDEX, encoding="utf-8") as fh:
         enc_html = fh.read()
@@ -428,6 +496,10 @@ def main():
             sys.exit("expected exactly one %s in plaintext" % name)
     plain = splice_const(plain0, "ADS", ads)
     plain = splice_const(plain, "KEYWORDS", kw)
+    if plain.count("const NEGATIVES = ") == 1:
+        plain = splice_const(plain, "NEGATIVES", neg)
+    else:
+        print("NEGATIVES const not found in page; skipping splice.")
     consts_path = os.environ.get("INVENTORY_CONSTS", os.path.join(HERE, "_private", "out", "consts.json"))
     plain, invnote = apply_inventory(plain, consts_path)
     print("Inventory:", invnote)
