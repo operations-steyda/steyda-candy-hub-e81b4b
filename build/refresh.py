@@ -312,6 +312,31 @@ def build_inbound(name_map):
             "total_lines": sum(s["lines"] for s in status)}
 
 
+# ---------- RESERVED (units Amazon counts in FBA total but aren't sellable) ----------
+def build_reserved():
+    """Per-SKU reserved(customer+processing) / researching / unfulfillable — the
+    bridge from Pool (sellable+incoming) to the Seller Central FBA headline."""
+    r = rows({"sellerOrVendorIds": [SELLER], "sourceId": SRC_FBA,
+              "columns": ["date", "sku", "reserved_customer_order", "reserved_fc_processing",
+                          "afn_researching_quantity", "unfulfillable_quantity"],
+              "from": (TODAY - datetime.timedelta(days=6)).isoformat(), "to": TO,
+              "outputType": "CSV", "limit": 5000})
+    if not r:
+        return {}
+    latest = max(x.get("date", "") for x in r)
+    out = {}
+    for x in r:
+        if x.get("date") != latest:
+            continue
+        sku = x.get("sku")
+        res = int(num(x.get("reserved_customer_order"))) + int(num(x.get("reserved_fc_processing")))
+        rsh = int(num(x.get("afn_researching_quantity")))
+        unf = int(num(x.get("unfulfillable_quantity")))
+        if sku and (res or rsh or unf):
+            out[sku] = {"res": res, "rsh": rsh, "unf": unf}
+    return out
+
+
 # ---------- crypto (matches encrypt_site.py) ----------
 def decrypt(index_html):
     def grab(name):
@@ -522,6 +547,13 @@ def main():
             print("Inbound: %d units, %d lines" % (inb["total_units"], inb["total_lines"]))
     except Exception as e:
         print("Inbound refresh skipped:", e)
+    try:
+        rsv = build_reserved()
+        if rsv and plain.count("const RESERVED = ") == 1:
+            plain = splice_const(plain, "RESERVED", rsv)
+            print("Reserved: %d SKUs with reserved/researching/unfulfillable" % len(rsv))
+    except Exception as e:
+        print("Reserved refresh skipped:", e)
     if plain == plain0:
         print("No data change; leaving index.html unchanged.")
         return
