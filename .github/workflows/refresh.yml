@@ -40,7 +40,11 @@ jobs:
         working-directory: build/_private
         env:
           DATADOE_API_KEY: ${{ secrets.DATADOE_API_KEY }}
-          # Joar Candy auto-download (optional — falls back to the cached xlsx if unset)
+          # Joar Candy LIVE pull via Apps Script web app (preferred — on-demand staged).
+          # Falls back to OAuth, then to the cached xlsx, if these are unset/unreachable.
+          JOAR_WEBAPP_URL: ${{ secrets.JOAR_WEBAPP_URL }}
+          JOAR_WEBAPP_TOKEN: ${{ secrets.JOAR_WEBAPP_TOKEN }}
+          # Joar Candy auto-download (legacy OAuth — dormant; kept as a fallback)
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
