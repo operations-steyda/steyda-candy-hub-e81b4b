@@ -273,44 +273,51 @@ def build_negatives():
 
 
 # ---------- INBOUND (FBA inbound shipments) ----------
-# Inbound = units genuinely on the way, from the FBA Inventory Health report's own
-# inbound columns (working / shipped / receiving), NOT the FBA Inbound Shipments feed.
-# The shipments feed counts a shipment's FULL quantity even once its units are located
-# (checked into FBA) — so a "Receiving" shipment at ~100% located double-counts units
-# that are already in Available/On-hand. These columns count only not-yet-available units,
-# which is also exactly what the Pool/replenishment math already uses for "incoming".
-INBOUND_BUCKETS = [("WORKING", "inbound_working"),      # created, not shipped (SC "Ready to ship"/"Working")
-                   ("SHIPPED", "inbound_shipped"),      # shipped, in transit
-                   ("RECEIVING", "inbound_received")]   # arrived, still being checked in
+# Inbound SHIPMENT TRACKING view, from the FBA Inbound Shipments feed (per-shipment detail:
+# id, status, destination, full quantity, and the SKU lines). CLOSED/cancelled plans are
+# dropped so it mirrors Seller Central Manage Shipments' open shipments. Note: this shows the
+# FULL shipment quantity even for "Receiving" shipments whose units are already located (so the
+# total differs from the Pool's "incoming", which counts only not-yet-available units).
+SRC_INBOUND = "8bc6f4bd09"
+INBOUND_EXCLUDE = {"CLOSED", "CANCELLED", "DELETED", "ERROR"}
+INBOUND_LABEL = {"WORKING": "Ready to ship", "READY_TO_SHIP": "Ready to ship", "SHIPPED": "Shipped",
+                 "IN_TRANSIT": "In transit", "RECEIVING": "Receiving", "CHECKED_IN": "Receiving",
+                 "DELIVERED": "Receiving"}
+INBOUND_ORDER = {"WORKING": 0, "READY_TO_SHIP": 0, "SHIPPED": 1, "IN_TRANSIT": 2,
+                 "RECEIVING": 3, "CHECKED_IN": 3, "DELIVERED": 3}
 
 
 def build_inbound(name_map):
-    r = rows({"sellerOrVendorIds": [SELLER], "sourceId": SRC_FBA,
-              "columns": ["date", "sku", "child_asin",
-                          "inbound_working", "inbound_shipped", "inbound_received"],
-              "from": (TODAY - datetime.timedelta(days=6)).isoformat(), "to": TO,
+    r = rows({"sellerOrVendorIds": [SELLER], "sourceId": SRC_INBOUND,
+              "columns": ["fba_inbound_shipment_id", "shipment_name", "fba_inbound_shipment_status",
+                          "destination_warehouse_id", "seller_sku", "child_asin", "quantity"],
               "outputType": "CSV", "limit": 5000})
-    if not r:
-        return {"status": [], "groups": [], "total_units": 0, "total_lines": 0}
-    latest = max(x.get("date", "") for x in r)
-    latest_rows = [x for x in r if x.get("date") == latest]
-    status, groups = [], []
-    for label, col in INBOUND_BUCKETS:
-        items = []
-        for x in latest_rows:
-            q = int(num(x.get(col)))
-            if q > 0:
-                sku = x.get("sku")
-                items.append({"sku": sku, "name": name_map.get(sku, sku),
-                              "asin": x.get("child_asin"), "units": q, "fc": ""})
-        if items:
-            items.sort(key=lambda z: -z["units"])
-            units = sum(i["units"] for i in items)
-            status.append({"status": label, "lines": len(items), "units": units, "skus": len(items)})
-            groups.append({"status": label, "lines": len(items), "units": units, "skus": items})
-    return {"status": status, "groups": groups,
-            "total_units": sum(s["units"] for s in status),
-            "total_lines": sum(s["lines"] for s in status)}
+    ships = {}
+    for x in r:
+        st = (x.get("fba_inbound_shipment_status") or "").upper()
+        if st in INBOUND_EXCLUDE:
+            continue
+        sid = x.get("fba_inbound_shipment_id") or ""
+        sh = ships.setdefault(sid, {"id": sid, "name": x.get("shipment_name") or sid, "status": st,
+                                    "sl": INBOUND_LABEL.get(st, st.title()),
+                                    "fc": x.get("destination_warehouse_id") or "", "units": 0, "skus": []})
+        q = int(num(x.get("quantity")))
+        sh["units"] += q
+        sku = x.get("seller_sku")
+        sh["skus"].append({"sku": sku, "name": name_map.get(sku, sku),
+                           "asin": x.get("child_asin"), "units": q})
+    shipments = list(ships.values())
+    for sh in shipments:
+        sh["skus"].sort(key=lambda z: -z["units"])
+    shipments.sort(key=lambda s: (INBOUND_ORDER.get(s["status"], 9), -s["units"]))
+    bys = {}
+    for sh in shipments:
+        b = bys.setdefault(sh["sl"], {"status": sh["sl"], "shipments": 0, "units": 0})
+        b["shipments"] += 1; b["units"] += sh["units"]
+    return {"shipments": shipments, "by_status": list(bys.values()),
+            "total_units": sum(s["units"] for s in shipments),
+            "total_shipments": len(shipments),
+            "total_lines": sum(len(s["skus"]) for s in shipments)}
 
 
 # ---------- RESERVED (units Amazon counts in FBA total but aren't sellable) ----------
@@ -543,9 +550,10 @@ def main():
         _nm = {}
     try:
         inb = build_inbound(_nm)
-        if inb["status"] and plain.count("const INBOUND = ") == 1:
+        if inb["shipments"] and plain.count("const INBOUND = ") == 1:
             plain = splice_const(plain, "INBOUND", inb)
-            print("Inbound: %d units, %d lines" % (inb["total_units"], inb["total_lines"]))
+            print("Inbound: %d shipments, %d units, %d SKU lines"
+                  % (inb["total_shipments"], inb["total_units"], inb["total_lines"]))
     except Exception as e:
         print("Inbound refresh skipped:", e)
     try:
