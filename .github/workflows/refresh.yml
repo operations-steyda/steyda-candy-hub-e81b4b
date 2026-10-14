@@ -40,6 +40,11 @@ jobs:
         working-directory: build/_private
         env:
           DATADOE_API_KEY: ${{ secrets.DATADOE_API_KEY }}
+          # Joar Candy auto-download (optional — falls back to the cached xlsx if unset)
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          JOAR_SHEET_ID: ${{ secrets.JOAR_SHEET_ID }}
         run: python build_inventory.py
 
       - name: Refresh PPC + keywords + inventory and re-encrypt
