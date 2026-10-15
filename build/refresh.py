@@ -498,7 +498,7 @@ def apply_inventory(plain0, consts_path):
         return plain0, "GUARD: inventory validation error (%s) — inventory left unchanged." % e
     # guards passed: splice PAYLOAD + warehouse consts + stock
     plain = plain0
-    for name in ("PAYLOAD", "WH", "SHIP", "JOARHTML"):
+    for name in ("PAYLOAD", "WH", "SHIP", "JOARHTML", "PLANNED"):
         if name in consts and ("const %s = " % name) in plain:
             plain = splice_line(plain, name, consts[name])
     if "stock" in consts:
