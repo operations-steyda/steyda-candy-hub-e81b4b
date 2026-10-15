@@ -280,6 +280,7 @@ def build_negatives():
 # total differs from the Pool's "incoming", which counts only not-yet-available units).
 SRC_INBOUND = "8bc6f4bd09"
 INBOUND_EXCLUDE = {"CLOSED", "CANCELLED", "DELETED", "ERROR"}
+INBOUND_STALE_DAYS = 30   # Amazon hasn't re-reported it in this long -> treat as closed/received
 INBOUND_LABEL = {"WORKING": "Ready to ship", "READY_TO_SHIP": "Ready to ship", "SHIPPED": "Shipped",
                  "IN_TRANSIT": "In transit", "RECEIVING": "Receiving", "CHECKED_IN": "Receiving",
                  "DELIVERED": "Receiving"}
@@ -290,7 +291,7 @@ INBOUND_ORDER = {"WORKING": 0, "READY_TO_SHIP": 0, "SHIPPED": 1, "IN_TRANSIT": 2
 def build_inbound(name_map):
     r = rows({"sellerOrVendorIds": [SELLER], "sourceId": SRC_INBOUND,
               "columns": ["fba_inbound_shipment_id", "shipment_name", "fba_inbound_shipment_status",
-                          "destination_warehouse_id", "seller_sku", "child_asin", "quantity"],
+                          "destination_warehouse_id", "seller_sku", "child_asin", "quantity", "last_seen_at"],
               "outputType": "CSV", "limit": 5000})
     ships = {}
     for x in r:
@@ -300,14 +301,30 @@ def build_inbound(name_map):
         sid = x.get("fba_inbound_shipment_id") or ""
         sh = ships.setdefault(sid, {"id": sid, "name": x.get("shipment_name") or sid, "status": st,
                                     "sl": INBOUND_LABEL.get(st, st.title()),
-                                    "fc": x.get("destination_warehouse_id") or "", "units": 0, "skus": []})
+                                    "fc": x.get("destination_warehouse_id") or "", "units": 0, "skus": [], "last_seen": ""})
         q = int(num(x.get("quantity")))
         sh["units"] += q
         sku = x.get("seller_sku")
         sh["skus"].append({"sku": sku, "name": name_map.get(sku, sku),
                            "asin": x.get("child_asin"), "units": q})
-    shipments = list(ships.values())
+        ls = (x.get("last_seen_at") or "")[:10]   # YYYY-MM-DD
+        if ls > sh["last_seen"]:
+            sh["last_seen"] = ls
+    # Amazon drops a shipment from the active-inbound feed once it's closed/received, but
+    # DataDoe keeps its last-known status (e.g. still "RECEIVING"). So a shipment Amazon
+    # hasn't re-reported in STALE_DAYS is treated as closed — this is what makes the view
+    # tally with Seller Central's open Manage-Shipments set. (2026-10-15)
+    def _fresh(sh):
+        ls = sh.get("last_seen", "")
+        if len(ls) < 10:
+            return True
+        try:
+            return (TODAY - datetime.date.fromisoformat(ls)).days <= INBOUND_STALE_DAYS
+        except Exception:
+            return True
+    shipments = [s for s in ships.values() if _fresh(s)]
     for sh in shipments:
+        sh.pop("last_seen", None)   # internal only
         sh["skus"].sort(key=lambda z: -z["units"])
     shipments.sort(key=lambda s: (INBOUND_ORDER.get(s["status"], 9), -s["units"]))
     bys = {}
