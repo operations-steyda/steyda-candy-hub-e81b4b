@@ -65,7 +65,8 @@ jobs:
               echo "consts.json unchanged."
             else
               git commit -m "consts.json refresh ($(date -u +%Y-%m-%d))"
-              git push || echo "::warning::consts.json push failed (check BUILD_REPO_TOKEN write scope)"
+              # checkout leaves a detached HEAD, so push the commit explicitly to master
+              git push origin HEAD:master || echo "::warning::consts.json push failed (check BUILD_REPO_TOKEN write scope)"
             fi
           else
             echo "::warning::out/consts.json not found; Billy will fall back to a local build."
