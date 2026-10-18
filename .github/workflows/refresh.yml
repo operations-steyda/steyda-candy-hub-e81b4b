@@ -2,9 +2,10 @@ name: Daily dashboard refresh
 
 on:
   schedule:
-    # Mondays only, 05:10 UTC ≈ 06:10–07:10 Sweden time. Use the in-dashboard
-    # "Refresh now" button for any off-schedule update. (cron day-of-week 1 = Monday.)
-    - cron: "10 5 * * 1"
+    # Sunday 23:00 UTC (early Monday) so the refresh lands BEFORE the local
+    # Monday 08:00 inventory-email task, which reads the consts.json this run
+    # commits. Use the in-dashboard "Refresh now" button for off-schedule updates.
+    - cron: "0 23 * * 0"
   workflow_dispatch:        # adds a manual "Run workflow" button in the Actions tab
 
 concurrency:
@@ -50,6 +51,25 @@ jobs:
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
           JOAR_SHEET_ID: ${{ secrets.JOAR_SHEET_ID }}
         run: python build_inventory.py
+
+      - name: Publish consts.json to the private build repo
+        # The Monday 08:00 local inventory-email task ("Billy") reads this file
+        # instead of rebuilding. Requires BUILD_REPO_TOKEN to have contents:write.
+        working-directory: build/_private
+        run: |
+          if [ -f out/consts.json ]; then
+            git config user.name "steyda-refresh-bot"
+            git config user.email "operations@steyda.com"
+            git add -f out/consts.json
+            if git diff --cached --quiet; then
+              echo "consts.json unchanged."
+            else
+              git commit -m "consts.json refresh ($(date -u +%Y-%m-%d))"
+              git push || echo "::warning::consts.json push failed (check BUILD_REPO_TOKEN write scope)"
+            fi
+          else
+            echo "::warning::out/consts.json not found; Billy will fall back to a local build."
+          fi
 
       - name: Refresh PPC + keywords + inventory and re-encrypt
         env:
