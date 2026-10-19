@@ -275,9 +275,17 @@ def build_negatives():
 # ---------- INBOUND (FBA inbound shipments) ----------
 # Inbound SHIPMENT TRACKING view, from the FBA Inbound Shipments feed (per-shipment detail:
 # id, status, destination, full quantity, and the SKU lines). CLOSED/cancelled plans are
-# dropped so it mirrors Seller Central Manage Shipments' open shipments. Note: this shows the
-# FULL shipment quantity even for "Receiving" shipments whose units are already located (so the
-# total differs from the Pool's "incoming", which counts only not-yet-available units).
+# dropped so it mirrors Seller Central Manage Shipments' open shipments.
+#
+# RECONCILE (2026-10-19): the DataDoe inbound feed has NO received/located column — only the
+# full planned `quantity` — so a "Receiving" shipment whose units are already located into
+# stock still reports its full quantity here. Seller Central confirmed these units are received
+# (Located == Expected) and sitting in Available, which is why Amazon's fresh FBA-inventory
+# `inbound_quantity` (the plan's "Inbound", carried as PAYLOAD inv.incoming) reads ~0. We treat
+# that fresh per-SKU incoming as the authoritative "still inbound" and reconcile this view to it:
+# each SKU's open units are allocated to its newest shipments, anything beyond is already
+# received and dropped. Result: this section's totals equal the plan's Inbound and tally with
+# Seller Central, automatically on every daily build — no manual "Refresh now" needed.
 SRC_INBOUND = "8bc6f4bd09"
 INBOUND_EXCLUDE = {"CLOSED", "CANCELLED", "DELETED", "ERROR"}
 INBOUND_STALE_DAYS = 30   # Amazon hasn't re-reported it in this long -> treat as closed/received
@@ -288,7 +296,36 @@ INBOUND_ORDER = {"WORKING": 0, "READY_TO_SHIP": 0, "SHIPPED": 1, "IN_TRANSIT": 2
                  "RECEIVING": 3, "CHECKED_IN": 3, "DELIVERED": 3}
 
 
-def build_inbound(name_map):
+def _inbound_created(name):
+    """Shipment creation date (YYYY-MM-DD) parsed from the 'FBA STA (MM/DD/YYYY HH:MM)...'
+    name, used only to order shipments newest-first for the reconcile allocation."""
+    m = re.search(r"\((\d{2})/(\d{2})/(\d{4})", name or "")
+    return "%s-%s-%s" % (m.group(3), m.group(1), m.group(2)) if m else ""
+
+
+def _reconcile_open(shipments, real_inbound):
+    """Keep only units that are GENUINELY still inbound per Amazon's fresh FBA-inventory
+    `inbound_quantity` (real_inbound: {sku: units}). Allocate each SKU's open quantity to its
+    shipments newest-first (older ones are received first); drop fully-received shipments and
+    trim partially-received ones to their open lines. Makes this view tally with the plan + SC."""
+    remaining = {k: int(v or 0) for k, v in (real_inbound or {}).items()}
+    kept = []
+    for sh in sorted(shipments, key=lambda s: s.get("_created", "") or s.get("last_seen", ""),
+                     reverse=True):
+        lines, tot = [], 0
+        for ln in sh["skus"]:
+            rem = remaining.get(ln["sku"], 0)
+            take = min(int(ln["units"]), rem)
+            if take > 0:
+                nl = dict(ln); nl["units"] = take
+                lines.append(nl); remaining[ln["sku"]] = rem - take; tot += take
+        if tot > 0:
+            ns = dict(sh); ns["skus"] = lines; ns["units"] = tot
+            kept.append(ns)
+    return kept
+
+
+def build_inbound(name_map, real_inbound=None):
     r = rows({"sellerOrVendorIds": [SELLER], "sourceId": SRC_INBOUND,
               "columns": ["fba_inbound_shipment_id", "shipment_name", "fba_inbound_shipment_status",
                           "destination_warehouse_id", "seller_sku", "child_asin", "quantity", "last_seen_at"],
@@ -299,9 +336,11 @@ def build_inbound(name_map):
         if st in INBOUND_EXCLUDE:
             continue
         sid = x.get("fba_inbound_shipment_id") or ""
-        sh = ships.setdefault(sid, {"id": sid, "name": x.get("shipment_name") or sid, "status": st,
+        _nm0 = x.get("shipment_name") or sid
+        sh = ships.setdefault(sid, {"id": sid, "name": _nm0, "status": st,
                                     "sl": INBOUND_LABEL.get(st, st.title()),
-                                    "fc": x.get("destination_warehouse_id") or "", "units": 0, "skus": [], "last_seen": ""})
+                                    "fc": x.get("destination_warehouse_id") or "", "units": 0, "skus": [],
+                                    "last_seen": "", "_created": _inbound_created(_nm0)})
         q = int(num(x.get("quantity")))
         sh["units"] += q
         sku = x.get("seller_sku")
@@ -323,8 +362,13 @@ def build_inbound(name_map):
         except Exception:
             return True
     shipments = [s for s in ships.values() if _fresh(s)]
+    # Reconcile to Amazon's fresh per-SKU inbound so received-but-not-"Closed" shipments
+    # stop inflating this view (see header note). Skipped only if real_inbound is unavailable.
+    if real_inbound is not None:
+        shipments = _reconcile_open(shipments, real_inbound)
     for sh in shipments:
         sh.pop("last_seen", None)   # internal only
+        sh.pop("_created", None)    # internal only
         sh["skus"].sort(key=lambda z: -z["units"])
     shipments.sort(key=lambda s: (INBOUND_ORDER.get(s["status"], 9), -s["units"]))
     bys = {}
@@ -563,11 +607,14 @@ def main():
     try:
         _pm = json.loads(re.search(r"const PAYLOAD = (\{.*?\});", plain, re.S).group(1).replace("<\\/", "</"))
         _nm = {rr["sku"]: (rr.get("shortname") or rr["sku"]) for rr in _pm["DATA"]["inv"]}
+        # Amazon's fresh per-SKU still-inbound (the plan's "Inbound" column) — authoritative
+        # truth we reconcile the shipment view against so it matches the plan + Seller Central.
+        _ri = {rr["sku"]: int(rr.get("incoming") or 0) for rr in _pm["DATA"]["inv"]}
     except Exception:
-        _nm = {}
+        _nm = {}; _ri = None
     try:
-        inb = build_inbound(_nm)
-        if inb["shipments"] and plain.count("const INBOUND = ") == 1:
+        inb = build_inbound(_nm, _ri)
+        if (inb["shipments"] or _ri is not None) and plain.count("const INBOUND = ") == 1:
             plain = splice_const(plain, "INBOUND", inb)
             print("Inbound: %d shipments, %d units, %d SKU lines"
                   % (inb["total_shipments"], inb["total_units"], inb["total_lines"]))
