@@ -1,10 +1,12 @@
-name: Daily dashboard refresh
+name: Weekly dashboard refresh
 
 on:
   schedule:
-    # Sunday 23:00 UTC (early Monday) so the refresh lands BEFORE the local
-    # Monday 08:00 inventory-email task, which reads the consts.json this run
-    # commits. Use the in-dashboard "Refresh now" button for off-schedule updates.
+    # WEEKLY — Sunday 23:00 UTC (early Monday) only, so the refresh lands BEFORE the
+    # local Monday 08:00 inventory-email task, which reads the consts.json this run
+    # commits. This is the ONLY automated run; it does NOT refresh daily. For an
+    # off-schedule update, use the in-dashboard "Update" button (it dispatches this
+    # same workflow on demand) or the Actions tab "Run workflow" button.
     - cron: "0 23 * * 0"
   workflow_dispatch:        # adds a manual "Run workflow" button in the Actions tab
 
