@@ -24,6 +24,8 @@ SELLER = "602828c9-b688-463c-9ea5-3040f0e55dd1"
 SRC_ADS = "08cdc77d3d"          # Ad Performance by Campaign & Date
 SRC_TERMS = "e94e967198"        # Search Term Performance (Ads)
 SRC_FBA = "44fc5ba0ce"          # FBA Inventory Health (has sales_shipped_last_90_days)
+SRC_PROFIT = "57a0cb319c"       # Profit by SKU & Date (sales, COGS, fees, ad spend, profit, sessions per ASIN/day)
+SRC_ADASIN = "d0017e92fb"       # Ad Performance by ASIN & Date (clicks/orders per ASIN/day)
 ITERS = 200000
 HERE = os.path.dirname(os.path.abspath(__file__))
 INDEX = os.path.normpath(os.path.join(HERE, "..", "index.html"))
@@ -410,6 +412,58 @@ def build_reserved():
     return out
 
 
+# ---------- PPC COMMAND CENTRE (profit-aware, all DataDoe) ----------
+def build_ppcx():
+    """Fetch the 4 DataDoe tables the PPC command centre needs and hand them to ppcx.build().
+    60 days of daily history -> two 30-day windows + a PPC-conversion baseline; search terms for
+    the last 30 days (keyword opportunities). Windows end 2 days before the newest data day
+    (Amazon's still-settling tail) -- ppcx.py handles that."""
+    import ppcx
+    frm = (TODAY - datetime.timedelta(days=62)).isoformat()
+    prof = rows({"sellerOrVendorIds": [SELLER], "sourceId": SRC_PROFIT,
+                 "columns": ["date", "child_asin", "sales_s", "adspend_s", "adsales_s", "profit_s",
+                             "orders_s", "units_s", "cogs_s", "sessions_s"],
+                 "groupBy": ["date", "child_asin"],
+                 "aggregations": [{"column": "total_sales", "aggregation": "sum", "alias": "sales_s"},
+                                  {"column": "ad_spend", "aggregation": "sum", "alias": "adspend_s"},
+                                  {"column": "ad_sales", "aggregation": "sum", "alias": "adsales_s"},
+                                  {"column": "profit", "aggregation": "sum", "alias": "profit_s"},
+                                  {"column": "total_orders", "aggregation": "sum", "alias": "orders_s"},
+                                  {"column": "total_units_sold", "aggregation": "sum", "alias": "units_s"},
+                                  {"column": "cogs_total", "aggregation": "sum", "alias": "cogs_s"},
+                                  {"column": "total_sessions", "aggregation": "sum", "alias": "sessions_s"}],
+                 "from": frm, "to": TO, "outputType": "CSV", "limit": 5000})
+    adasin = rows({"sellerOrVendorIds": [SELLER], "sourceId": SRC_ADASIN,
+                   "columns": ["date", "child_asin", "spend", "sales", "orders", "clicks", "impr"],
+                   "groupBy": ["date", "child_asin"],
+                   "aggregations": [{"column": "ad_spend", "aggregation": "sum", "alias": "spend"},
+                                    {"column": "ad_sales", "aggregation": "sum", "alias": "sales"},
+                                    {"column": "ad_orders", "aggregation": "sum", "alias": "orders"},
+                                    {"column": "ad_clicks", "aggregation": "sum", "alias": "clicks"},
+                                    {"column": "ad_impressions", "aggregation": "sum", "alias": "impr"}],
+                   "from": frm, "to": TO, "outputType": "CSV", "limit": 5000})
+    camp = rows({"sellerOrVendorIds": [SELLER], "sourceId": SRC_ADS,
+                 "columns": ["date", "spend", "sales", "orders", "clicks", "impr"],
+                 "groupBy": ["date"],
+                 "aggregations": [{"column": "ad_spend", "aggregation": "sum", "alias": "spend"},
+                                  {"column": "ad_sales", "aggregation": "sum", "alias": "sales"},
+                                  {"column": "ad_orders", "aggregation": "sum", "alias": "orders"},
+                                  {"column": "ad_clicks", "aggregation": "sum", "alias": "clicks"},
+                                  {"column": "ad_impressions", "aggregation": "sum", "alias": "impr"}],
+                 "from": frm, "to": TO, "outputType": "CSV", "limit": 5000})
+    terms = rows({"sellerOrVendorIds": [SELLER], "sourceId": SRC_TERMS,
+                  "columns": ["ad_search_term", "ad_match_type", "ad_campaign_name",
+                              "clicks", "orders", "sales", "spend"],
+                  "groupBy": ["ad_search_term", "ad_match_type", "ad_campaign_name"],
+                  "aggregations": [{"column": "ad_clicks", "aggregation": "sum", "alias": "clicks"},
+                                   {"column": "ad_orders", "aggregation": "sum", "alias": "orders"},
+                                   {"column": "ad_sales", "aggregation": "sum", "alias": "sales"},
+                                   {"column": "ad_spend", "aggregation": "sum", "alias": "spend"}],
+                  "from": (TODAY - datetime.timedelta(days=32)).isoformat(), "to": TO,
+                  "outputType": "CSV", "limit": 5000})
+    return ppcx.build(prof, adasin, terms, camp)
+
+
 # ---------- crypto (matches encrypt_site.py) ----------
 def decrypt(index_html):
     def grab(name):
@@ -631,6 +685,16 @@ def main():
             print("Reserved: %d SKUs with reserved/researching/unfulfillable" % len(rsv))
     except Exception as e:
         print("Reserved refresh skipped:", e)
+    try:
+        px = build_ppcx()
+        if px and plain.count("const PPCX = ") == 1:
+            plain = splice_line(plain, "PPCX", json.dumps(px, ensure_ascii=False).replace("</", "<" + chr(92) + "/"))
+            print("PPCX: %d ASINs, %d daily rows, %d warnings, %d keyword opportunities (asof %s)"
+                  % (len(px["asins"]), len(px["daily"]), len(px["warns"]), px["harvest_n"], px["asof"]))
+        elif px:
+            print("PPCX const not in page yet; skipping splice (deploy the page update first).")
+    except Exception as e:
+        print("PPCX refresh skipped:", e)
     if plain == plain0:
         print("No data change; leaving index.html unchanged.")
         return
