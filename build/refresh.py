@@ -277,15 +277,14 @@ def build_negatives():
 # id, status, destination, full quantity, and the SKU lines). CLOSED/cancelled plans are
 # dropped so it mirrors Seller Central Manage Shipments' open shipments.
 #
-# RECONCILE (2026-10-19): the DataDoe inbound feed has NO received/located column — only the
-# full planned `quantity` — so a "Receiving" shipment whose units are already located into
-# stock still reports its full quantity here. Seller Central confirmed these units are received
-# (Located == Expected) and sitting in Available, which is why Amazon's fresh FBA-inventory
-# `inbound_quantity` (the plan's "Inbound", carried as PAYLOAD inv.incoming) reads ~0. We treat
-# that fresh per-SKU incoming as the authoritative "still inbound" and reconcile this view to it:
-# each SKU's open units are allocated to its newest shipments, anything beyond is already
-# received and dropped. Result: this section's totals equal the plan's Inbound and tally with
-# Seller Central, automatically on every daily build — no manual "Refresh now" needed.
+# STATUS MATCH (2026-10-19): the DataDoe inbound feed has NO received/located column and its
+# status lags Seller Central (it can still say "Ready to ship"/"In transit" after SC flips a
+# shipment to "Receiving"). To make this section read the SAME as SC Manage Shipments, we keep
+# each shipment at its FULL quantity (so Units match SC) but relabel status to "Receiving" once
+# any of its units are located — detected by allocating Amazon's fresh per-SKU still-inbound
+# (PAYLOAD inv.incoming) to shipments newest-first (see _status_reconcile). The plan's separate
+# Inbound column carries the still-inbound number; the subtitle notes that located units also
+# count in Available. All automatic on every build — no manual "Refresh now" needed.
 SRC_INBOUND = "8bc6f4bd09"
 INBOUND_EXCLUDE = {"CLOSED", "CANCELLED", "DELETED", "ERROR"}
 INBOUND_STALE_DAYS = 30   # Amazon hasn't re-reported it in this long -> treat as closed/received
@@ -303,26 +302,30 @@ def _inbound_created(name):
     return "%s-%s-%s" % (m.group(3), m.group(1), m.group(2)) if m else ""
 
 
-def _reconcile_open(shipments, real_inbound):
-    """Keep only units that are GENUINELY still inbound per Amazon's fresh FBA-inventory
-    `inbound_quantity` (real_inbound: {sku: units}). Allocate each SKU's open quantity to its
-    shipments newest-first (older ones are received first); drop fully-received shipments and
-    trim partially-received ones to their open lines. Makes this view tally with the plan + SC."""
+def _status_reconcile(shipments, real_inbound):
+    """Make the status match Seller Central's Manage Shipments WITHOUT changing quantities.
+    SC shows a shipment as "Receiving" once its units start being located at the FC, even while
+    DataDoe's feed still carries a stale pre-arrival status (Working/Ready to ship/Shipped/In
+    transit). We detect "located" by allocating Amazon's fresh still-inbound (real_inbound:
+    {sku: inbound_quantity}) to shipments newest-first; any shipment with located>0 (i.e. some
+    of its units are already in stock) is relabelled "Receiving" to mirror SC. A shipment whose
+    units are entirely still-inbound keeps its pre-arrival status. Quantities stay FULL so the
+    section's Units match SC's Units column; the plan's Inbound column carries the still-inbound.
+    Adds per-shipment `open` (still inbound) and `loc` (already located) for reference."""
     remaining = {k: int(v or 0) for k, v in (real_inbound or {}).items()}
-    kept = []
     for sh in sorted(shipments, key=lambda s: s.get("_created", "") or s.get("last_seen", ""),
                      reverse=True):
-        lines, tot = [], 0
+        still = 0
         for ln in sh["skus"]:
             rem = remaining.get(ln["sku"], 0)
             take = min(int(ln["units"]), rem)
-            if take > 0:
-                nl = dict(ln); nl["units"] = take
-                lines.append(nl); remaining[ln["sku"]] = rem - take; tot += take
-        if tot > 0:
-            ns = dict(sh); ns["skus"] = lines; ns["units"] = tot
-            kept.append(ns)
-    return kept
+            remaining[ln["sku"]] = rem - take
+            still += take
+        sh["open"] = still
+        sh["loc"] = max(0, sh["units"] - still)
+        if sh["loc"] > 0 and sh["status"] not in INBOUND_EXCLUDE:
+            sh["status"] = "RECEIVING"
+            sh["sl"] = INBOUND_LABEL["RECEIVING"]
 
 
 def build_inbound(name_map, real_inbound=None):
@@ -362,10 +365,11 @@ def build_inbound(name_map, real_inbound=None):
         except Exception:
             return True
     shipments = [s for s in ships.values() if _fresh(s)]
-    # Reconcile to Amazon's fresh per-SKU inbound so received-but-not-"Closed" shipments
-    # stop inflating this view (see header note). Skipped only if real_inbound is unavailable.
+    # Relabel status to match Seller Central Manage Shipments (received-but-not-"Closed"
+    # shipments show as "Receiving"), WITHOUT reducing quantities. Skipped only if real_inbound
+    # is unavailable. The plan's Inbound column (PAYLOAD incoming) remains the still-inbound.
     if real_inbound is not None:
-        shipments = _reconcile_open(shipments, real_inbound)
+        _status_reconcile(shipments, real_inbound)
     for sh in shipments:
         sh.pop("last_seen", None)   # internal only
         sh.pop("_created", None)    # internal only
