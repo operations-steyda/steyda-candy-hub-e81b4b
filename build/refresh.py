@@ -695,6 +695,14 @@ def main():
             print("PPCX const not in page yet; skipping splice (deploy the page update first).")
     except Exception as e:
         print("PPCX refresh skipped:", e)
+    # Stamp the real build time. The page ignores any browser-saved upload (Data & Uploads) whose
+    # savedAt is older than BUILD_ISO (loadUploads). It was hard-coded to 2026-09-09 and never
+    # advanced, so every upload saved since then silently overrode each fresh build in that
+    # browser (stale stock, staged at WH, FBA snapshot). UTC to match the page's savedAt format.
+    _bi = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M")
+    plain, _n = re.subn(r"^const BUILD_ISO='[^']*';", lambda _m: "const BUILD_ISO='%s';" % _bi,
+                        plain, count=1, flags=re.M)
+    print("BUILD_ISO stamped %s" % _bi if _n else "BUILD_ISO const not found; stale-upload guard unchanged")
     if plain == plain0:
         print("No data change; leaving index.html unchanged.")
         return
