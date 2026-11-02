@@ -289,7 +289,15 @@ def build_negatives():
 # count in Available. All automatic on every build — no manual "Refresh now" needed.
 SRC_INBOUND = "8bc6f4bd09"
 INBOUND_EXCLUDE = {"CLOSED", "CANCELLED", "DELETED", "ERROR"}
-INBOUND_STALE_DAYS = 30   # Amazon hasn't re-reported it in this long -> treat as closed/received
+# DataDoe's inbound feed stops re-reporting a shipment once it stops changing, so a shipment that is
+# STILL OPEN in Seller Central can go quiet for weeks (09/23 sat at READY_TO_SHIP, last seen 34 days ago,
+# while SC showed it Receiving). A short stale window therefore drops open shipments (it did, 2026-11-02),
+# and a long one lets closed ones linger, because DataDoe never learns that SC closed them. So: long
+# backstop window here + an explicit list of shipments the owner has seen CLOSED in Seller Central.
+INBOUND_STALE_DAYS = 90
+# Seller Central "Closed" shipments (DataDoe still shows them RECEIVING). Matched on the creation stamp in
+# the shipment name "FBA STA (MM/DD/YYYY ...". Add a prefix here whenever a shipment shows Closed in SC.
+INBOUND_CLOSED_NAMES = ("FBA STA (07/27/2026", "FBA STA (08/11/2026", "FBA STA (09/02/2026")
 INBOUND_LABEL = {"WORKING": "Ready to ship", "READY_TO_SHIP": "Ready to ship", "SHIPPED": "Shipped",
                  "IN_TRANSIT": "In transit", "RECEIVING": "Receiving", "CHECKED_IN": "Receiving",
                  "DELIVERED": "Receiving"}
@@ -366,7 +374,8 @@ def build_inbound(name_map, real_inbound=None):
             return (TODAY - datetime.date.fromisoformat(ls)).days <= INBOUND_STALE_DAYS
         except Exception:
             return True
-    shipments = [s for s in ships.values() if _fresh(s)]
+    shipments = [s for s in ships.values()
+                 if _fresh(s) and not str(s.get("name", "")).startswith(INBOUND_CLOSED_NAMES)]
     # Relabel status to match Seller Central Manage Shipments (received-but-not-"Closed"
     # shipments show as "Receiving"), WITHOUT reducing quantities. Skipped only if real_inbound
     # is unavailable. The plan's Inbound column (PAYLOAD incoming) remains the still-inbound.
