@@ -606,9 +606,13 @@ def apply_inventory(plain0, consts_path):
         freshP = json.loads(consts["PAYLOAD"].replace("<\\/", "</"))
         fresh = {r["sku"]: r for r in freshP["DATA"]["inv"]}
         fresh_skus = list(fresh)
-        # GUARD 1: SKU set must not change (DataDoe status lag can silently drop sellers)
+        # GUARD 1: SKU set must not change (DataDoe status lag can silently drop sellers).
+        # INVENTORY_ALLOW_ADD = SKUs the owner has deliberately added to the plan; the guard
+        # ignores them as "added" so a new product can land once (the page then carries it and
+        # the sets match on every later run). Dropped SKUs still always trip the guard.
+        INVENTORY_ALLOW_ADD = {"SCBULKBUBS20"}   # Bubs 2.0 Fruity (B0HF7Y21RG) — added 2026-11-03
         dropped = sorted(set(cur_skus) - set(fresh_skus))
-        added = sorted(set(fresh_skus) - set(cur_skus))
+        added = sorted(set(fresh_skus) - set(cur_skus) - INVENTORY_ALLOW_ADD)
         if dropped or added:
             return plain0, ("GUARD: SKU set changed (dropped %s, added %s) — inventory left "
                             "unchanged; run a manual refresh to review." % (dropped, added))
