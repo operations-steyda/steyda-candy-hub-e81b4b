@@ -27,7 +27,7 @@ jobs:
       - name: Checkout private build repo (model + assets)
         uses: actions/checkout@v4
         with:
-          repository: kitbrianhernandez-ai/steyda-candy-build
+          repository: operations-steyda/steyda-candy-build
           token: ${{ secrets.BUILD_REPO_TOKEN }}
           path: build/_private
 
