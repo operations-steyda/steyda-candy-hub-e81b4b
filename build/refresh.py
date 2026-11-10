@@ -34,7 +34,7 @@ PNAME = {"B0F9PQQXCJ": "Squashies Mix", "B0DSW63TDX": "Bubs 0.5", "B0GK9FRNJJ": 
          "B0H4ZVD6MN": "Bubs 2.0", "B0DKXMZN69": "Rail SS", "B0GPFK2RN7": "Tuttifrutti 0.5"}
 
 KEY = os.environ["DATADOE_API_KEY"]
-PW = os.environ["SITE_PW"]
+PW = os.environ["SITE_PW"].strip()  # tolerate a stray space/newline pasted into the secret
 
 
 # ---------- DataDoe REST ----------
