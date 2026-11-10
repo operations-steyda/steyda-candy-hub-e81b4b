@@ -611,8 +611,15 @@ def apply_inventory(plain0, consts_path):
         # ignores them as "added" so a new product can land once (the page then carries it and
         # the sets match on every later run). Dropped SKUs still always trip the guard.
         INVENTORY_ALLOW_ADD = {"SCBULKBUBS20"}   # Bubs 2.0 Fruity (B0HF7Y21RG) — added 2026-11-03
-        dropped = sorted(set(cur_skus) - set(fresh_skus))
-        added = sorted(set(fresh_skus) - set(cur_skus) - INVENTORY_ALLOW_ADD)
+        # 2026-11-10 (owner): a NEW product that is physically moving — packed at Joar
+        # (staged), inbound to Amazon, or a Joar-only placeholder ("JOAR-…", no Amazon SKU
+        # yet) — is always welcome in the plan, so it never trips the guard. Joar-only
+        # placeholders also vanish on their own once a real SKU takes over.
+        def _moving(r):
+            return (r.get("staged") or 0) > 0 or (r.get("incoming") or 0) > 0 or r.get("joar_new")
+        dropped = sorted(s for s in set(cur_skus) - set(fresh_skus) if not s.startswith("JOAR-"))
+        added = sorted(s for s in set(fresh_skus) - set(cur_skus) - INVENTORY_ALLOW_ADD
+                       if not _moving(fresh[s]))
         if dropped or added:
             return plain0, ("GUARD: SKU set changed (dropped %s, added %s) — inventory left "
                             "unchanged; run a manual refresh to review." % (dropped, added))
